@@ -2,6 +2,8 @@ const express = require('express');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const pool = require('../config/db');
+const { ethers } = require("ethers");
+const { dexContract, provider } = require("../config/blockchain");
 const router = express.Router();
 
 
@@ -112,5 +114,79 @@ const authenticate = (req, res, next) => {
       await pool.query('UPDATE orders SET status = $1 WHERE id = $2', ['filled', matchedOrder.id]);
     }
   }
-  
+
+
+const authenticate = require("../middleware/auth");
+
+
+router.post("/swap/a-to-b", authenticate, async (req, res) => {
+  const { amountA } = req.body; 
+  const userId = req.user.id;
+
+  try {
+
+    const user = await pool.query("SELECT wallet_address FROM users WHERE id = $1", [userId]);
+    if (!user.rows[0].wallet_address) {
+      return res.status(400).json({ error: "No wallet address linked" });
+    }
+
+
+    const signer = new ethers.Wallet(process.env.PRIVATE_KEY, provider); 
+    const dexWithSigner = dexContract.connect(signer);
+
+
+    const tokenA = new ethers.Contract(process.env.TOKEN_A_ADDRESS, [
+      "function approve(address spender, uint256 amount) external returns (bool)",
+    ], signer);
+    await tokenA.approve(dexContract.address, ethers.utils.parseEther(amountA.toString()));
+
+
+    const tx = await dexWithSigner.swapAtoB(ethers.utils.parseEther(amountA.toString()));
+    await tx.wait();
+
+    
+    await pool.query(
+      "INSERT INTO trades (user_id, token_pair, amount, price, executed_at) VALUES ($1, $2, $3, $4, NOW())",
+      [userId, "TokenA/TokenB", amountA, 2] 
+    );
+
+    res.json({ message: "Swap successful", txHash: tx.hash });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+
+router.post("/swap/b-to-a", authenticate, async (req, res) => {
+  const { amountB } = req.body;
+  const userId = req.user.id;
+
+  try {
+    const user = await pool.query("SELECT wallet_address FROM users WHERE id = $1", [userId]);
+    if (!user.rows[0].wallet_address) {
+      return res.status(400).json({ error: "No wallet address linked" });
+    }
+
+    const signer = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
+    const dexWithSigner = dexContract.connect(signer);
+
+    const tokenB = new ethers.Contract(process.env.TOKEN_B_ADDRESS, [
+      "function approve(address spender, uint256 amount) external returns (bool)",
+    ], signer);
+    await tokenB.approve(dexContract.address, ethers.utils.parseEther(amountB.toString()));
+
+    const tx = await dexWithSigner.swapBtoA(ethers.utils.parseEther(amountB.toString()));
+    await tx.wait();
+
+    await pool.query(
+      "INSERT INTO trades (user_id, token_pair, amount, price, executed_at) VALUES ($1, $2, $3, $4, NOW())",
+      [userId, "TokenB/TokenA", amountB, 0.5] 
+    );
+
+    res.json({ message: "Swap successful", txHash: tx.hash });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 module.exports = router;
